@@ -1,4 +1,5 @@
 import os
+import time
 import pandas as pd
 import requests
 from datetime import datetime
@@ -14,23 +15,20 @@ API_COPIN_OI = os.environ.get("API_COPIN_OI")
 
 
 def date_to_timestamp(date):
-    """
-    Convert a date string or datetime object to millisecond timestamp.
-
-    Args:
-        date (str or datetime): Date in 'YYYY-MM-DD' format or datetime object
-
-    Returns:
-        int: Timestamp in milliseconds
-    """
+    """Convert a date/datetime string or datetime object to millisecond timestamp."""
     if isinstance(date, str):
-        date = datetime.strptime(date, "%Y-%m-%d")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                date = datetime.strptime(date, fmt)
+                break
+            except ValueError:
+                continue
     timestamp_seconds = datetime.timestamp(date)
     timestamp_milliseconds = int(timestamp_seconds * 1000)
     return timestamp_milliseconds
 
 
-def get_price_API_HYPERLIQUID(pair, open_time, close_time):
+def get_price_API_HYPERLIQUID(pair, open_time, close_time, max_retries: int = 3, candle_interval: str = "1h"):
     """
     Fetch historical price data from HyperLiquid API.
 
@@ -38,126 +36,93 @@ def get_price_API_HYPERLIQUID(pair, open_time, close_time):
         pair (str): Trading pair symbol
         open_time (str or datetime): Start time for data fetch
         close_time (str or datetime): End time for data fetch
+        max_retries (int): Number of retry attempts on connection failure
 
     Returns:
-        pandas.DataFrame: DataFrame containing OHLCV data with columns:
-            - open: Opening price
-            - close: Closing price
-            - high: Highest price
-            - low: Lowest price
-            - volume: Trading volume
-        str: Error message if request fails
+        pandas.DataFrame: DataFrame containing OHLCV data, or None on failure
     """
-    open_time = date_to_timestamp(open_time)
-    close_time = date_to_timestamp(close_time)
+    open_time_ms = date_to_timestamp(open_time)
+    close_time_ms = date_to_timestamp(close_time)
     APIURL = HYPERLIQUID_API_URL
 
-    data = {
+    payload = {
         "type": "candleSnapshot",
         "req": {
             "coin": pair,
-            "interval": "1h",
-            "startTime": open_time,
-            "endTime": close_time,
+            "interval": candle_interval,
+            "startTime": open_time_ms,
+            "endTime": close_time_ms,
         },
     }
-
     headers = {"Content-Type": "application/json"}
 
-    try:
-        response = requests.post(APIURL, json=data, headers=headers)
-        data = response.json()
-        df = pd.DataFrame(data)
-        df.rename(
-            columns={
-                "t": "timestamp",
-                "T": "close_time",
-                "s": "symbol",
-                "i": "interval",
-                "o": "open",
-                "c": "close",
-                "h": "high",
-                "l": "low",
-                "v": "volume",
-                "n": "number_of_trades",
-            },
-            inplace=True,
-        )
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(APIURL, json=payload, headers=headers, timeout=15)
+            if response.status_code != 200:
+                print(f"[HyperLiquid] HTTP {response.status_code}: {response.text[:200]}")
+                return None
+            candles = response.json()
+            if not candles:
+                print(f"[HyperLiquid] Empty response for {pair} {open_time_ms}–{close_time_ms}")
+                return None
+            df = pd.DataFrame(candles)
+            df.rename(
+                columns={
+                    "t": "timestamp",
+                    "T": "close_time",
+                    "s": "symbol",
+                    "i": "interval",
+                    "o": "open",
+                    "c": "close",
+                    "h": "high",
+                    "l": "low",
+                    "v": "volume",
+                    "n": "number_of_trades",
+                },
+                inplace=True,
+            )
+            df = df[["open", "close", "high", "low", "volume"]]
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df.sort_index(inplace=True)
+            return df
+        except Exception as e:
+            print(f"[HyperLiquid] Attempt {attempt}/{max_retries} failed for {pair}: {e}")
+            if attempt < max_retries:
+                time.sleep(5)
 
-        df = df[["open", "close", "high", "low", "volume"]]
-        numeric_cols = ["open", "close", "high", "low", "volume"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.sort_index(inplace=True)
-
-        return df
-    except Exception as e:
-        print(e)
-        return "Cannot find price of this crypto"
+    print(f"[HyperLiquid] All {max_retries} attempts failed for {pair}, giving up.")
+    return None
 
 
 def get_price_API_BINANCE(pair, open_time, close_time, limit: int = 1000):
-    """
-    Fetch historical price data from Binance Futures API.
-
-    Args:
-        pair (str): Trading pair symbol
-        open_time (str or datetime): Start time for data fetch
-        close_time (str or datetime): End time for data fetch
-        limit (int, optional): Maximum number of records to return. Defaults to 1000
-
-    Returns:
-        pandas.DataFrame: DataFrame containing OHLCV data with columns:
-            - open: Opening price
-            - close: Closing price
-            - high: Highest price
-            - low: Lowest price
-            - volume: Trading volume
-        str: Error message if request fails
-    """
     open_time = date_to_timestamp(open_time)
     close_time = date_to_timestamp(close_time)
-    APIURL = BINANCE_API_URL + "/fapi/v1/continuousKlines"
-    paramsMap = {
-        "pair": pair,
-        "contractType": "PERPETUAL",
-        "interval": "1h",
-        "startTime": open_time,
-        "endTime": close_time,
+    APIURL = "https://api.bybit.com/v5/market/kline"
+    params = {
+        "category": "linear",
+        "symbol": pair + "USDT",
+        "interval": "60",
+        "start": open_time,
+        "end": close_time,
         "limit": limit,
     }
     try:
-        response = requests.get(APIURL, params=paramsMap)
-        print(paramsMap)
+        response = requests.get(APIURL, params=params, timeout=15)
         data = response.json()
-        df = pd.DataFrame(
-            data,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_asset_volume",
-                "number_of_trades",
-                "taker_buy_base_asset_volume",
-                "taker_buy_quote_asset_volume",
-                "ignore",
-            ],
-        )
-
+        rows = data["result"]["list"]
+        df = pd.DataFrame(rows, columns=[
+            "timestamp", "open", "high", "low", "close", "volume", "turnover"
+        ])
         df = df[["open", "close", "high", "low", "volume"]]
-        numeric_cols = ["open", "close", "high", "low", "volume"]
-        for col in numeric_cols:
+        for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.sort_index(inplace=True)
-
+        df = df.iloc[::-1].reset_index(drop=True)
         return df
     except Exception as e:
-        print(e)
-        return "Cannot find price of this crypto"
+        print(f"[Bybit] Exception for {pair}: {e}")
+        return None
 
 
 def get_OI_position_Copin(pair: str, isLong: bool):
@@ -189,7 +154,7 @@ def get_OI_position_Copin(pair: str, isLong: bool):
     }
     headers = {"Content-Type": "application/json"}
     try:
-        response = requests.post(APIURL, headers=headers, data=json.dumps(query))
+        response = requests.post(APIURL, headers=headers, data=json.dumps(query), timeout=15)
         data = response.json()
         df = data["data"]
         total_size = sum(d["size"] for d in df)

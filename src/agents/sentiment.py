@@ -24,9 +24,18 @@ def sentiment_agent(state: AgentState):
             - data: Original data dict
     """
     data = state["data"]
-    bullish_signals, bearish_signals = data["insider_trades"]
     show_reasoning = state["metadata"]["show_reasoning"]
 
+    insider_trades = data["insider_trades"]
+    if not isinstance(insider_trades, tuple) or len(insider_trades) != 2:
+        # Copin API unavailable — emit neutral signal so the run continues
+        message = HumanMessage(
+            content='{"signal": "neutral", "confidence": "50%", "reasoning": "OI data unavailable (API timeout)"}',
+            name="sentiment_agent",
+        )
+        return {"messages": [message], "data": data}
+
+    bullish_signals, bearish_signals = insider_trades
     bullish_signals = round(bullish_signals)
     bearish_signals = round(bearish_signals)
 

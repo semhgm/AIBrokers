@@ -39,12 +39,10 @@ def check_data_valid(crypto, start_date, end_date):
         open_time=start_date,
         close_time=end_date,
     )
-    insider_trades = get_LS_OI_Copin(pair=crypto)
-    if isinstance(prices, str) | isinstance(insider_trades, str):
+    if prices is None or isinstance(prices, str):
         print("Data invalid")
         return False
-    else:
-        return True
+    return True
 
 
 def market_data_agent(state: AgentState):
@@ -92,12 +90,16 @@ def market_data_agent(state: AgentState):
         start_date = data["start_date"]
 
     # Get the historical price data
-
     prices = get_price_API_HYPERLIQUID(
         pair=data["crypto"],
         open_time=start_date,
         close_time=end_date,
     )
+    if prices is None or (hasattr(prices, "empty") and prices.empty):
+        raise ValueError(
+            f"[market_data_agent] No price data for {data['crypto']} "
+            f"({start_date} – {end_date})"
+        )
 
     # Get the insider trades
     insider_trades = get_LS_OI_Copin(pair=data["crypto"])
